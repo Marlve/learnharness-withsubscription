@@ -7,7 +7,7 @@
  * defaults) applies at the capture.
  */
 
-import type { Usage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "typebox";
 import { invalidInputResult, toToolResult } from "../tool-execute.ts";
@@ -45,6 +45,9 @@ export function healStringifiedArrays(raw: unknown): unknown {
 	return out;
 }
 
+/** Turn budget for the nudge run (a schema-invalid retry still fits). */
+const NUDGE_TURNS = 3;
+
 export async function runSubmitAgent<T>(opts: {
 	role: ModelRole;
 	toolName: string;
@@ -78,8 +81,7 @@ export async function runSubmitAgent<T>(opts: {
 	validate?: (value: T) => string | null;
 }): Promise<T> {
 	let submitted: T | undefined;
-	const result = await runSubagent(
-		[
+	const tools: AgentTool<any>[] = [
 			// healToolRecord (owner, 2026-10-09): the standard argument heal
 		// over the extra tools (the auditor's graph set) — same as every
 		// registry.
@@ -105,30 +107,46 @@ export async function runSubmitAgent<T>(opts: {
 					return toToolResult(submitted);
 				},
 			} satisfies AgentTool<any>,
-		],
-		{
-			role: opts.role,
-			engine: opts.engine,
-			systemPrompt: opts.systemPrompt,
-			prompt: opts.prompt,
-			maxTurns: opts.maxTurns ?? 4,
-			abortSignal: opts.signal,
-			chatId: opts.chatId,
-			onAssistantMessage: (message, step) =>
-				opts.onStep(
-					message.usage,
-					// Provider-qualified stamp (model slots wave, 2026-09-20):
-					// pi reports the bare id; usage stamps carry provider:id to
-					// match the price table's uniform keys.
-					`${message.provider}:${message.model}`,
-					step,
-					message.stopReason,
-					message.content.filter((c) => c.type === "toolCall").map((c) => (c as { name: string }).name).join(", ") || "(none)",
-				),
-			shouldStop: (_message, toolResults) => toolResults.some((r) => r.toolName === opts.toolName && !r.isError),
-		},
-	);
-	void result;
+	];
+	const run = {
+		role: opts.role,
+		engine: opts.engine,
+		systemPrompt: opts.systemPrompt,
+		maxTurns: opts.maxTurns ?? 4,
+		abortSignal: opts.signal,
+		chatId: opts.chatId,
+		onAssistantMessage: (message: AssistantMessage, step: number) =>
+			opts.onStep(
+				message.usage,
+				// Provider-qualified stamp (model slots wave, 2026-09-20):
+				// pi reports the bare id; usage stamps carry provider:id to
+				// match the price table's uniform keys.
+				`${message.provider}:${message.model}`,
+				step,
+				message.stopReason,
+				message.content.filter((c) => c.type === "toolCall").map((c) => (c as { name: string }).name).join(", ") || "(none)",
+			),
+		shouldStop: (_message: AssistantMessage, toolResults: ToolResultMessage[]) =>
+			toolResults.some((r) => r.toolName === opts.toolName && !r.isError),
+	};
+	const first = await runSubagent(tools, { ...run, prompt: opts.prompt });
+	if (!submitted) {
+		// A model that stops in prose instead of calling the submit tool (seen
+		// on a first import, where the auditor had nothing to link) gets one
+		// nudge on the same transcript before the run is declared failed.
+		await runSubagent(tools, {
+			...run,
+			maxTurns: NUDGE_TURNS,
+			messages: [
+				...first.newMessages,
+				{
+					role: "user",
+					content: `You stopped without calling ${opts.toolName}. Your entire deliverable is one ${opts.toolName} call — make it now; do not reply in prose.`,
+					timestamp: Date.now(),
+				},
+			],
+		});
+	}
 	if (!submitted) throw new Error(opts.neverSubmitted);
 	return submitted;
 }
