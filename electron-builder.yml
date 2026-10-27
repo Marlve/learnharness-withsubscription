@@ -188,7 +188,7 @@ publish:
   # would be a leak. desktop:dist passes no --publish flag, so builds never
   # upload; publishing happens at release time (GH_TOKEN + --publish).
   - provider: github
-    owner: amosblomqvist
-    repo: learnharness
+    owner: Marlve
+    repo: learnharness-withsubscription
     # All three CI jobs contribute assets; only the owner publishes it.
     releaseType: draft
